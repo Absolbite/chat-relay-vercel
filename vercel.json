@@ -1,9 +1,5 @@
 {
-  "version": 2,
-  "routes": [
-    { "src": "/send",     "dest": "/api/index.js" },
-    { "src": "/messages", "dest": "/api/index.js" },
-    { "src": "/ping",     "dest": "/api/index.js" },
-    { "src": "/(.*)",     "dest": "/api/index.js" }
+  "rewrites": [
+    { "source": "/(.*)", "destination": "/api/index.js" }
   ]
 }
