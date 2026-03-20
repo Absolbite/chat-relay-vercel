@@ -1,12 +1,36 @@
 const http = require("http");
 
 // ── In-memory storage ──────────────────────────────────────────
-const messages = [];   // { id, topic, msgType, display, name, uid, toUid, text, time }
-const online   = {};   // topic → { uid: { display, name, lastSeen } }
+const messages = [];
+const online   = {};
 let   nextId   = 1;
 
-const MAX_MESSAGES = 500;   // global cap to avoid memory leak
-const OFFLINE_MS   = 30000; // player considered offline after 30s no ping
+const MAX_MESSAGES = 500;
+const OFFLINE_MS   = 30000;
+
+// ── Badwords & Mute ────────────────────────────────────────────
+const BAD_WORDS = [
+    "fuck", "fucking", "shit", "bitch", "bitches",
+    "nigger", "nigga", "faggot", "cunt", "ass",
+    "dick", "cock", "pussy", "whore", "retard"
+];
+
+const muted = {};
+const MUTE_DURATION = 60 * 60 * 1000;
+
+function isMuted(uid) {
+    if (!muted[uid]) return false;
+    if (Date.now() > muted[uid]) {
+        delete muted[uid];
+        return false;
+    }
+    return true;
+}
+
+function containsBadWord(text) {
+    const lower = text.toLowerCase();
+    return BAD_WORDS.some(word => lower.includes(word));
+}
 
 // ── Helpers ────────────────────────────────────────────────────
 function json(res, code, data) {
@@ -54,11 +78,9 @@ const server = http.createServer(async (req, res) => {
     const path   = url.pathname;
     const method = req.method;
 
-    // CORS preflight
     if (method === "OPTIONS") { json(res, 200, {}); return; }
 
-    // ── POST /send  ────────────────────────────────────────────
-    // Body: { topic, msgType, display, name, uid, toUid?, text, time }
+    // ── POST /send ─────────────────────────────────────────────
     if (method === "POST" && path === "/send") {
         let body;
         try { body = await readBody(req); }
@@ -67,12 +89,24 @@ const server = http.createServer(async (req, res) => {
         const { topic, msgType, display, name, uid, toUid, text, time } = body;
         if (!topic || !uid) { json(res, 400, { error: "missing fields" }); return; }
 
-        // Register / update online presence
         if (!online[topic]) online[topic] = {};
         online[topic][uid] = { display: display || uid, name: name || uid, lastSeen: Date.now() };
 
-        // ping = just update presence, no message stored
         if (msgType === "ping" || !text) { json(res, 200, { ok: true }); return; }
+
+        // Проверка мута
+        if (isMuted(uid)) {
+            const remaining = Math.ceil((muted[uid] - Date.now()) / 60000);
+            json(res, 403, { error: "muted", minutesLeft: remaining });
+            return;
+        }
+
+        // Проверка плохих слов
+        if (containsBadWord(text)) {
+            muted[uid] = Date.now() + MUTE_DURATION;
+            json(res, 403, { error: "muted", minutesLeft: 60 });
+            return;
+        }
 
         const msg = {
             id: nextId++,
@@ -83,7 +117,7 @@ const server = http.createServer(async (req, res) => {
             uid,
             toUid:   toUid  || null,
             text,
-            time:    time   || new Date().toISOString().substr(11,5)
+            time:    time   || new Date().toISOString().substr(11, 5)
         };
 
         messages.push(msg);
@@ -93,9 +127,7 @@ const server = http.createServer(async (req, res) => {
         return;
     }
 
-    // ── GET /messages?topic=X&after=N&uid=ME  ─────────────────
-    // Returns messages for this topic since id > after
-    // Filters: public ones + private ones where toUid==me or uid==me
+    // ── GET /messages ──────────────────────────────────────────
     if (method === "GET" && path === "/messages") {
         const topic = url.searchParams.get("topic");
         const after = parseInt(url.searchParams.get("after") || "0", 10);
@@ -103,7 +135,6 @@ const server = http.createServer(async (req, res) => {
 
         if (!topic) { json(res, 400, { error: "missing topic" }); return; }
 
-        // Update lastSeen for this uid (heartbeat)
         if (myUid) {
             if (!online[topic]) online[topic] = {};
             if (online[topic][myUid]) {
@@ -125,7 +156,7 @@ const server = http.createServer(async (req, res) => {
         return;
     }
 
-    // ── GET /online?topic=X  ───────────────────────────────────
+    // ── GET /online ────────────────────────────────────────────
     if (method === "GET" && path === "/online") {
         const topic = url.searchParams.get("topic");
         if (!topic) { json(res, 400, { error: "missing topic" }); return; }
@@ -133,7 +164,7 @@ const server = http.createServer(async (req, res) => {
         return;
     }
 
-    // ── GET /ping?topic=X&uid=Y&display=Z&name=W  ─────────────
+    // ── GET /ping ──────────────────────────────────────────────
     if (method === "GET" && path === "/ping") {
         const topic   = url.searchParams.get("topic");
         const uid     = url.searchParams.get("uid");
