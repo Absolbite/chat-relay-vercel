@@ -1,14 +1,13 @@
 const messages = global._messages || (global._messages = []);
 const online   = global._online   || (global._online   = {});
-const OFFLINE_MS = 30000;
+const OFFLINE_MS = 90000; // 90s (heartbeat теперь каждые 60s)
 
 function pruneOffline(topic) {
     const now = Date.now();
     if (!online[topic]) return;
-    for (const uid in online[topic]) {
+    for (const uid in online[topic])
         if (now - online[topic][uid].lastSeen > OFFLINE_MS)
             delete online[topic][uid];
-    }
 }
 
 function getOnlineList(topic) {
@@ -19,6 +18,7 @@ function getOnlineList(topic) {
 function send(res, code, data) {
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Content-Type", "application/json");
+    res.setHeader("Cache-Control", "no-store");
     res.status(code).json(data);
 }
 
@@ -32,7 +32,7 @@ module.exports = async function handler(req, res) {
     const clean  = path.replace(/\/+$/, "");
     const params = new URLSearchParams(url.includes("?") ? url.split("?")[1] : "");
 
-    // GET /ping
+    // GET /ping — оставляем для первого коннекта
     if (req.method === "GET" && (clean === "/ping" || clean === "")) {
         const topic   = params.get("topic");
         const uid     = params.get("uid");
@@ -46,21 +46,34 @@ module.exports = async function handler(req, res) {
         return;
     }
 
-    // GET /messages
+    // GET /messages — обновляет lastSeen сам, отдельный heartbeat не нужен
     if (req.method === "GET" && clean === "/messages") {
-        const topic = params.get("topic");
-        const after = parseInt(params.get("after") || "0", 10);
-        const myUid = params.get("uid") || "";
+        const topic   = params.get("topic");
+        const after   = parseInt(params.get("after") || "0", 10);
+        const myUid   = params.get("uid") || "";
+        const display = params.get("display") || myUid;
+        const name    = params.get("name") || myUid;
+
         if (!topic) { send(res, 400, { error: "missing topic" }); return; }
-        if (myUid && online[topic] && online[topic][myUid])
-            online[topic][myUid].lastSeen = Date.now();
+
+        // /messages сам обновляет lastSeen — heartbeat отдельно не нужен
+        if (myUid) {
+            if (!online[topic]) online[topic] = {};
+            online[topic][myUid] = { display, name, lastSeen: Date.now() };
+        }
+
         const result = messages.filter(m => {
             if (m.topic !== topic || m.id <= after) return false;
             if (m.msgType === "public") return true;
             if (m.msgType === "private") return m.toUid === myUid || m.uid === myUid;
             return false;
         });
-        send(res, 200, { messages: result, onlineList: getOnlineList(topic) });
+
+        // onlineList всегда — клиент должен знать кто ушёл офлайн
+        send(res, 200, {
+            messages: result,
+            onlineList: getOnlineList(topic)
+        });
         return;
     }
 
